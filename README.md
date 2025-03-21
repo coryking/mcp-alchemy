@@ -2,13 +2,20 @@
 
 **Status: Works great and is in daily use without any known bugs.**
 
+> **Azure Support**: This fork adds seamless Azure CLI token authentication for Azure PostgreSQL Flexible Server. No password needed - just use `AZURE_TOKEN` in your connection string and let the server handle token management. [Learn more about Azure authentication](#azure-authentication).
+>
+> ```python
+> # Example connection string with Azure CLI authentication
+> DB_URL="postgresql://user@myserver:AZURE_TOKEN@myserver.postgres.database.azure.com/dbname"
+> ```
+
 Let Claude be your database expert! MCP Alchemy connects Claude Desktop directly to your databases, allowing it to:
 
 - Help you explore and understand your database structure
 - Assist in writing and validating SQL queries
 - Displays relationships between tables
 - Analyze large datasets and create reports
-- Claude Desktop Can analyse and create artifacts for very large datasets using [claude-local-files](https://github.com/runekaagaard/claude-local-files).
+- Claude Desktop Can analyse and create artifacts for very large datasets using [claude-local-files](https://github.com/runekaagaard/claude-local-files)
 - Supports Azure CLI token authentication for Azure PostgreSQL Flex servers ([learn more](https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-azure-ad-authentication))
 
 Works with PostgreSQL, MySQL, MariaDB, SQLite, Oracle, MS SQL Server and a host of other [SQLAlchemy-compatible](https://docs.sqlalchemy.org/en/20/dialects/) databases.
