@@ -1,13 +1,20 @@
-# MCP Alchemy
+# MCP Alchemy - Azure CLI Authentication Fork
+
+A fork of MCP Alchemy that adds seamless Azure CLI token authentication for Azure PostgreSQL Flexible Server. No passwords needed - just use Azure CLI authentication in your connection string and let the server handle token management.
+
+```python
+# Quick start: Connect to Azure PostgreSQL Flex with CLI authentication
+DB_URL="postgresql://user@myserver:AZURE_TOKEN@myserver.postgres.database.azure.com/dbname"
+```
+
+**Key Features:**
+
+- 🔐 **Azure CLI Authentication**: Zero-config token management for Azure PostgreSQL Flex
+- 🔄 **Automatic Token Refresh**: Handles token lifecycle seamlessly
+- 🛡️ **Secure**: No passwords in connection strings
+- ✨ **Simple**: Just use `AZURE_TOKEN` in your connection string
 
 **Status: Works great and is in daily use without any known bugs.**
-
-> **Azure Support**: This fork adds seamless Azure CLI token authentication for Azure PostgreSQL Flexible Server. No password needed - just use `AZURE_TOKEN` in your connection string and let the server handle token management. [Learn more about Azure authentication](#azure-authentication).
->
-> ```python
-> # Example connection string with Azure CLI authentication
-> DB_URL="postgresql://user@myserver:AZURE_TOKEN@myserver.postgres.database.azure.com/dbname"
-> ```
 
 Let Claude be your database expert! MCP Alchemy connects Claude Desktop directly to your databases, allowing it to:
 
@@ -164,7 +171,7 @@ uv pip install cx_oracle
 
 ## Azure Authentication
 
-MCP Alchemy supports Azure CLI token-based authentication, tested with Azure PostgreSQL Flexible Server. While the token authentication mechanism might work with other Azure database services, it has only been verified with PostgreSQL Flex.
+This fork of MCP Alchemy adds support for Azure CLI token-based authentication and has been tested with Azure PostgreSQL Flexible Server. While the token authentication mechanism might work with other Azure database services, it has only been verified with PostgreSQL Flex.
 
 To use Azure authentication:
 
