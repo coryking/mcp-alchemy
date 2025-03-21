@@ -3,11 +3,18 @@ from typing import Optional
 from datetime import datetime, date
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import create_engine, inspect, text
-
+from auth.tokens import token_cache
+from azure.identity import AzureCliCredential
 ### Database ###
 
-def get_engine(readonly=True):
+def get_connection_string() -> str:
     connection_string = os.environ['DB_URL']
+    if 'AZURE_TOKEN' in connection_string:
+        connection_string = connection_string.replace('AZURE_TOKEN', token_cache.get_token())
+    return connection_string
+
+def get_engine(readonly=True):
+    connection_string = get_connection_string()
     return create_engine(connection_string, isolation_level='AUTOCOMMIT', execution_options={'readonly': readonly})
 
 def get_db_info():
