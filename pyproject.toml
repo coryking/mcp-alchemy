@@ -3,14 +3,15 @@ name = "mcp-alchemy"
 version = "2025.8.15.91819"
 description = "A MCP server that connects to your database"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=2.11.0",
     "sqlalchemy>=2.0.36",
     "azure-identity>=1.15.0",
     "azure-core>=1.30.0",
     "psycopg2-binary>=2.9.10",
-]
+    "pydantic"
+    ]
 authors = [
   { name="Rune Kaagaard" },
 ]

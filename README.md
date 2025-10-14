@@ -71,14 +71,15 @@ cached causing uv to raise a versioning error. Restarting the MCP client once ag
         "mcp-alchemy"
       ],
       "env": {
-        "DB_URL": "sqlite:////absolute/path/to/database.db"
+        "DB_DEFAULT_DESC": "My SQLite Database",
+        "DB_DEFAULT_URL": "sqlite:////absolute/path/to/database.db"
       }
     }
   }
 }
 ```
 
-### PostgreSQL
+### PostgreSQL (Single Database)
 
 ```json
 {
@@ -95,7 +96,37 @@ cached causing uv to raise a versioning error. Restarting the MCP client once ag
         "mcp-alchemy"
       ],
       "env": {
-        "DB_URL": "postgresql://user:password@localhost/dbname"
+        "DB_DEFAULT_DESC": "My PostgreSQL Database",
+        "DB_DEFAULT_URL": "postgresql://user:password@localhost/dbname"
+      }
+    }
+  }
+}
+```
+
+### PostgreSQL (Multiple Databases)
+
+```json
+{
+  "mcpServers": {
+    "multi_db_server": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcp-alchemy==2025.8.15.91819",
+        "--with",
+        "psycopg2-binary",
+        "--refresh-package",
+        "mcp-alchemy",
+        "mcp-alchemy"
+      ],
+      "env": {
+        "DB_PRODUCTION_DESC": "Production Database",
+        "DB_PRODUCTION_URL": "postgresql://user:pass@prod-host/dbname",
+        "DB_DEVELOPMENT_DESC": "Development Database",
+        "DB_DEVELOPMENT_URL": "postgresql://user:pass@dev-host/dbname",
+        "DB_STAGING_DESC": "Staging Environment",
+        "DB_STAGING_URL": "postgresql://user:pass@staging-host/dbname"
       }
     }
   }
@@ -119,7 +150,8 @@ cached causing uv to raise a versioning error. Restarting the MCP client once ag
         "mcp-alchemy"
       ],
       "env": {
-        "DB_URL": "mysql+pymysql://user:password@localhost/dbname"
+        "DB_DEFAULT_DESC": "My MySQL Database",
+        "DB_DEFAULT_URL": "mysql+pymysql://user:password@localhost/dbname"
       }
     }
   }
@@ -143,7 +175,8 @@ cached causing uv to raise a versioning error. Restarting the MCP client once ag
         "mcp-alchemy"
       ],
       "env": {
-        "DB_URL": "mssql+pymssql://user:password@localhost/dbname"
+        "DB_DEFAULT_DESC": "My SQL Server Database",
+        "DB_DEFAULT_URL": "mssql+pymssql://user:password@localhost/dbname"
       }
     }
   }
@@ -167,7 +200,8 @@ cached causing uv to raise a versioning error. Restarting the MCP client once ag
         "mcp-alchemy"
       ],
       "env": {
-        "DB_URL": "oracle+oracledb://user:password@localhost/dbname"
+        "DB_DEFAULT_DESC": "My Oracle Database",
+        "DB_DEFAULT_URL": "oracle+oracledb://user:password@localhost/dbname"
       }
     }
   }
@@ -191,7 +225,8 @@ cached causing uv to raise a versioning error. Restarting the MCP client once ag
         "mcp-alchemy"
       ],
       "env": {
-        "DB_URL": "crate://user:password@localhost:4200/?schema=testdrive"
+        "DB_DEFAULT_DESC": "My CrateDB Database",
+        "DB_DEFAULT_URL": "crate://user:password@localhost:4200/?schema=testdrive"
       }
     }
   }
@@ -218,7 +253,8 @@ For connecting to CrateDB Cloud, use a URL like
         "mcp-alchemy"
       ],
       "env": {
-        "DB_URL": "vertica+vertica_python://user:password@localhost:5433/dbname",
+        "DB_DEFAULT_DESC": "My Vertica Database",
+        "DB_DEFAULT_URL": "vertica+vertica_python://user:password@localhost:5433/dbname",
         "DB_ENGINE_OPTIONS": "{\"connect_args\": {\"ssl\": false}}"
       }
     }
@@ -228,7 +264,36 @@ For connecting to CrateDB Cloud, use a URL like
 
 ## Environment Variables
 
-- `DB_URL`: SQLAlchemy [database URL](https://docs.sqlalchemy.org/en/20/core/engines.html#database-urls) (required)
+### Database Configuration
+
+MCP Alchemy supports multiple databases through environment variable pairs. For each database, set:
+
+- `DB_{NAME}_DESC`: Human-readable description of the database (optional, defaults to empty string)
+- `DB_{NAME}_URL`: SQLAlchemy [database URL](https://docs.sqlalchemy.org/en/20/core/engines.html#database-urls) for the database
+
+**Examples:**
+
+```bash
+# Single database (backwards compatible)
+DB_DEFAULT_DESC="My Database"
+DB_DEFAULT_URL="postgresql://user:pass@localhost/db"
+
+# Multiple databases
+DB_PRODUCTION_DESC="Production Database"
+DB_PRODUCTION_URL="postgresql://user:pass@prod-host/db"
+DB_DEVELOPMENT_DESC="Development Database"
+DB_DEVELOPMENT_URL="postgresql://user:pass@dev-host/db"
+```
+
+**Notes:**
+
+- Database names are derived from the environment variable prefix (e.g., `DB_PRODUCTION_` → database name `"production"`)
+- Names are case-insensitive (PRODUCTION, production, Production all work the same)
+- Use `AZURE_TOKEN` in URLs for Azure CLI authentication (replaced automatically)
+- If no `DB_{NAME}_URL` variables are found, falls back to the legacy `DB_URL` format
+
+### Other Configuration
+
 - `CLAUDE_LOCAL_FILES_PATH`: Directory for full result sets (optional)
 - `EXECUTE_QUERY_MAX_CHARS`: Maximum output length (optional, default 4000)
 - `DB_ENGINE_OPTIONS`: JSON string containing additional SQLAlchemy engine options (optional)
@@ -257,10 +322,12 @@ For databases with aggressive timeout settings (like MySQL's 8-hour default), th
 
 ### Tools
 
+All tools accept a `database` parameter to specify which configured database to query.
+
 - **all_table_names**
 
-  - Return all table names in the database
-  - No input required
+  - Return all table names in the specified database
+  - Input: `database` (string): Database to query
   - Returns comma-separated list of tables
 
   ```
@@ -269,19 +336,23 @@ For databases with aggressive timeout settings (like MySQL's 8-hour default), th
 
 - **filter_table_names**
 
-  - Find tables matching a substring
-  - Input: `q` (string)
+  - Find tables matching a substring in the specified database
+  - Inputs:
+    - `database` (string): Database to query
+    - `q` (string): Substring to match
   - Returns matching table names
 
   ```
-  Input: "user"
+  Input: database="production", q="user"
   Returns: "users, user_roles, user_permissions"
   ```
 
 - **schema_definitions**
 
-  - Get detailed schema for specified tables
-  - Input: `table_names` (string[])
+  - Get detailed schema for specified tables in the specified database
+  - Inputs:
+    - `database` (string): Database to query
+    - `table_names` (string[]): Tables to get schema for
   - Returns table definitions including:
     - Column names and types
     - Primary keys
@@ -302,6 +373,7 @@ For databases with aggressive timeout settings (like MySQL's 8-hour default), th
 
   - Execute SQL query with vertical output format
   - Inputs:
+    - `database` (string): Database to query
     - `query` (string): SQL query
     - `params` (object, optional): Query parameters
   - Returns results in clean vertical format:
@@ -326,6 +398,8 @@ For databases with aggressive timeout settings (like MySQL's 8-hour default), th
 ## Azure Authentication
 
 This fork adds seamless Azure CLI token authentication for Azure PostgreSQL Flexible Server. While primarily tested with PostgreSQL Flex Server, the token authentication mechanism may work with other Azure database services that support Azure AD token authentication.
+
+**Multi-Database Support**: Each configured database can independently use `AZURE_TOKEN` authentication, allowing secure access to multiple Azure databases through a single MCP server.
 
 1. **Connection String Format**:
 

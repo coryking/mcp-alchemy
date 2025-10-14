@@ -2,17 +2,18 @@ import os
 import json
 import hashlib
 from datetime import datetime, date
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from fastmcp.utilities.logging import get_logger
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Inspector
 from sqlalchemy.engine.result import Result
 
-# Azure token authentication imports
-from auth.tokens import token_cache
+from pydantic import Field
+
+from mcp_alchemy.models import DatabaseManager
 
 ### Helpers ###
 
@@ -22,101 +23,14 @@ def tests_set_global(k: str, v: Any) -> None:
 ### Database ###
 
 logger = get_logger(__name__)
-engine = None
+database_manager = DatabaseManager.from_environment()
 
-def get_connection_string() -> str:
-    """Get connection string with Azure token substitution"""
-    connection_string = os.environ['DB_URL']
-    if 'AZURE_TOKEN' in connection_string:
-        connection_string = connection_string.replace('AZURE_TOKEN', token_cache.get_token())
-    return connection_string
 
-def create_new_engine():
-    """Create engine with MCP-optimized settings to handle long-running connections"""
-    db_engine_options = os.environ.get('DB_ENGINE_OPTIONS')
-    user_options = json.loads(db_engine_options) if db_engine_options else {}
-
-    # MCP-optimized defaults that can be overridden by user
-    options = {
-        'isolation_level': 'AUTOCOMMIT',
-        # Test connections before use (handles MySQL 8hr timeout, network drops)
-        'pool_pre_ping': True,
-        # Keep minimal connections (MCP typically handles one request at a time)
-        'pool_size': 1,
-        # Allow temporary burst capacity for edge cases
-        'max_overflow': 2,
-        # Force refresh connections older than 1hr (well under MySQL's 8hr default)
-        'pool_recycle': 3600,
-        # User can override any of the above
-        **user_options
-    }
-
-    return create_engine(get_connection_string(), **options)
-
-def get_connection():
-    global engine
-
-    try:
-        try:
-            if engine is None:
-                engine = create_new_engine()
-
-            connection = engine.connect()
-
-            # Set version variable for databases that support it
-            try:
-                _ = connection.execute(text(f"SET @mcp_alchemy_version = '{VERSION}'"))
-            except Exception:
-                # Some databases don't support session variables
-                pass
-
-            return connection
-
-        except Exception as e:
-            logger.warning(f"First connection attempt failed: {e}")
-
-            # Database might have restarted or network dropped - start fresh
-            if engine is not None:
-                try:
-                    engine.dispose()
-                except Exception:
-                    pass
-
-            # One retry with fresh engine handles most transient failures
-            engine = create_new_engine()
-            connection = engine.connect()
-
-            return connection
-
-    except Exception:
-        logger.exception("Failed to get database connection after retry")
-        raise
-
-def get_db_info():
-    with get_connection() as conn:
-        engine = conn.engine
-        url = engine.url
-        version_info = engine.dialect.server_version_info
-        version_str = '.'.join(str(x) for x in version_info) if version_info else "unknown"
-
-        result = [
-            f"Connected to {engine.dialect.name}",
-            f"version {version_str}",
-            f"database {url.database}",
-        ]
-
-        if url.host:
-            result.append(f"on {url.host}")
-
-        if url.username:
-            result.append(f"as user {url.username}")
-
-        return " ".join(result) + "."
 
 ### Constants ###
 
 VERSION = "2025.8.15.91819"
-DB_INFO = get_db_info()
+AVAILABLE_DATABASES = database_manager.get_available_databases_text()
 EXECUTE_QUERY_MAX_CHARS = int(os.environ.get('EXECUTE_QUERY_MAX_CHARS', 4000))
 CLAUDE_LOCAL_FILES_PATH = os.environ.get('CLAUDE_LOCAL_FILES_PATH')
 
@@ -125,22 +39,28 @@ CLAUDE_LOCAL_FILES_PATH = os.environ.get('CLAUDE_LOCAL_FILES_PATH')
 mcp = FastMCP("MCP Alchemy")
 get_logger(__name__).info(f"Starting MCP Alchemy version {VERSION}")
 
-@mcp.tool(description=f"Return all table names in the database separated by comma. {DB_INFO}")
-def all_table_names() -> str:
-    with get_connection() as conn:
+@mcp.tool(description=f"Return all table names in the database separated by comma. {AVAILABLE_DATABASES}")
+def all_table_names(database: Annotated[str, Field(description="Database to query")]) -> str:
+    with database_manager.get_connection(database) as conn:
         inspector = inspect(conn)
         return ", ".join(inspector.get_table_names())
 
 @mcp.tool(
-    description=f"Return all table names in the database containing the substring 'q' separated by comma. {DB_INFO}"
+    description=f"Return all table names in the database containing the substring 'q' separated by comma. {AVAILABLE_DATABASES}"
 )
-def filter_table_names(q: str) -> str:
-    with get_connection() as conn:
+def filter_table_names(
+    database: Annotated[str, Field(description="Database to query")],
+    q: Annotated[str, Field(description="Substring to search for in table names")]
+) -> str:
+    with database_manager.get_connection(database) as conn:
         inspector = inspect(conn)
         return ", ".join(x for x in inspector.get_table_names() if q in x)
 
-@mcp.tool(description=f"Returns schema and relation information for the given tables. {DB_INFO}")
-def schema_definitions(table_names: list[str]) -> str:
+@mcp.tool(description=f"Returns schema and relation information for the given tables. {AVAILABLE_DATABASES}")
+def schema_definitions(
+        database: Annotated[str, Field(description="Database to query")],
+        table_names: Annotated[list[str], Field(default_factory=list, description="The names of the tables to get the schema for")]
+    ) -> str:
     def format(inspector: Inspector, table_name: str) -> str:
         columns = inspector.get_columns(table_name)
         foreign_keys = inspector.get_foreign_keys(table_name)
@@ -168,7 +88,7 @@ def schema_definitions(table_names: list[str]) -> str:
 
         return "\n".join(result)
 
-    with get_connection() as conn:
+    with database_manager.get_connection(database) as conn:
         inspector = inspect(conn)
         return "\n".join(format(inspector, table_name) for table_name in table_names)
 
@@ -181,14 +101,15 @@ def execute_query_description():
     parts.append(
         "IMPORTANT: You MUST use the params parameter for query parameter substitution (e.g. 'WHERE id = :id' with params={'id': 123}) to prevent SQL injection. Direct string concatenation is a serious security risk."
     )
-    parts.append(DB_INFO)
+    parts.append(AVAILABLE_DATABASES)
     return " ".join(parts)
 
 @mcp.tool(description=execute_query_description())
-def execute_query(query: str, params: dict[str, Any] | None = None) -> str:
-    if params is None:
-        params = {}
-
+def execute_query(
+    database: Annotated[str, Field(description="Database to query")],
+    query: Annotated[str, Field(description="SQL query to execute")],
+    params: Annotated[dict[str, Any], Field(default_factory=dict, description="Query parameters for safe substitution")]
+) -> str:
     def format_value(val: Any) -> str:
         """Format a value for display, handling None and datetime types"""
         if val is None:
@@ -259,7 +180,7 @@ def execute_query(query: str, params: dict[str, Any] | None = None) -> str:
             " (ALWAYS prefer fetching this url in artifacts instead of hardcoding the values if at all possible)")
 
     try:
-        with get_connection() as connection:
+        with database_manager.get_connection(database) as connection:
             cursor_result = connection.execute(text(query), params)
 
             if not cursor_result.returns_rows:
