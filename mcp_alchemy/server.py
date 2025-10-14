@@ -37,22 +37,19 @@ CLAUDE_LOCAL_FILES_PATH = os.environ.get('CLAUDE_LOCAL_FILES_PATH')
 mcp = FastMCP("MCP Alchemy")
 get_logger(__name__).info(f"Starting MCP Alchemy version {VERSION}")
 
-@mcp.tool(description=f"Return all table names in the database separated by comma. {AVAILABLE_DATABASES}")
-def all_table_names(database: Annotated[str, Field(description="Database to query")]) -> str:
-    with database_manager.get_connection(database) as conn:
-        inspector = inspect(conn)
-        return ", ".join(inspector.get_table_names())
-
 @mcp.tool(
-    description=f"Return all table names in the database containing the substring 'q' separated by comma. {AVAILABLE_DATABASES}"
+    description=f"Return table names in the database. If 'q' is provided, filter to names containing that substring. {AVAILABLE_DATABASES}"
 )
-def filter_table_names(
+def get_table_names(
     database: Annotated[str, Field(description="Database to query")],
-    q: Annotated[str, Field(description="Substring to search for in table names")]
+    q: Annotated[str | None, Field(default=None, description="Optional substring to search for in table names (if not provided, returns all tables)")]
 ) -> str:
     with database_manager.get_connection(database) as conn:
         inspector = inspect(conn)
-        return ", ".join(x for x in inspector.get_table_names() if q in x)
+        table_names = inspector.get_table_names()
+        if q:
+            table_names = [name for name in table_names if q in name]
+        return ", ".join(table_names)
 
 @mcp.tool(description=f"Returns schema and relation information for the given tables. {AVAILABLE_DATABASES}")
 def schema_definitions(
