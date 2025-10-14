@@ -2,24 +2,27 @@ import os
 import json
 import hashlib
 from datetime import datetime, date
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.utilities.logging import get_logger
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Inspector
+from sqlalchemy.engine.result import Result
 
 # Azure token authentication imports
 from auth.tokens import token_cache
 
 ### Helpers ###
 
-def tests_set_global(k, v):
+def tests_set_global(k: str, v: Any) -> None:
     globals()[k] = v
 
 ### Database ###
 
 logger = get_logger(__name__)
-ENGINE = None
+engine = None
 
 def get_connection_string() -> str:
     """Get connection string with Azure token substitution"""
@@ -51,18 +54,18 @@ def create_new_engine():
     return create_engine(get_connection_string(), **options)
 
 def get_connection():
-    global ENGINE
+    global engine
 
     try:
         try:
-            if ENGINE is None:
-                ENGINE = create_new_engine()
+            if engine is None:
+                engine = create_new_engine()
 
-            connection = ENGINE.connect()
+            connection = engine.connect()
 
             # Set version variable for databases that support it
             try:
-                connection.execute(text(f"SET @mcp_alchemy_version = '{VERSION}'"))
+                _ = connection.execute(text(f"SET @mcp_alchemy_version = '{VERSION}'"))
             except Exception:
                 # Some databases don't support session variables
                 pass
@@ -73,19 +76,19 @@ def get_connection():
             logger.warning(f"First connection attempt failed: {e}")
 
             # Database might have restarted or network dropped - start fresh
-            if ENGINE is not None:
+            if engine is not None:
                 try:
-                    ENGINE.dispose()
+                    engine.dispose()
                 except Exception:
                     pass
 
             # One retry with fresh engine handles most transient failures
-            ENGINE = create_new_engine()
-            connection = ENGINE.connect()
+            engine = create_new_engine()
+            connection = engine.connect()
 
             return connection
 
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to get database connection after retry")
         raise
 
@@ -93,9 +96,12 @@ def get_db_info():
     with get_connection() as conn:
         engine = conn.engine
         url = engine.url
+        version_info = engine.dialect.server_version_info
+        version_str = '.'.join(str(x) for x in version_info) if version_info else "unknown"
+
         result = [
             f"Connected to {engine.dialect.name}",
-            f"version {'.'.join(str(x) for x in engine.dialect.server_version_info)}",
+            f"version {version_str}",
             f"database {url.database}",
         ]
 
@@ -135,7 +141,7 @@ def filter_table_names(q: str) -> str:
 
 @mcp.tool(description=f"Returns schema and relation information for the given tables. {DB_INFO}")
 def schema_definitions(table_names: list[str]) -> str:
-    def format(inspector, table_name):
+    def format(inspector: Inspector, table_name: str) -> str:
         columns = inspector.get_columns(table_name)
         foreign_keys = inspector.get_foreign_keys(table_name)
         primary_keys = set(inspector.get_pk_constraint(table_name)["constrained_columns"])
@@ -173,14 +179,17 @@ def execute_query_description():
     if CLAUDE_LOCAL_FILES_PATH:
         parts.append("Claude Desktop may fetch the full result set via an url for analysis and artifacts.")
     parts.append(
-        "IMPORTANT: You MUST use the params parameter for query parameter substitution (e.g. 'WHERE id = :id' with "
-        "params={'id': 123}) to prevent SQL injection. Direct string concatenation is a serious security risk.")
+        "IMPORTANT: You MUST use the params parameter for query parameter substitution (e.g. 'WHERE id = :id' with params={'id': 123}) to prevent SQL injection. Direct string concatenation is a serious security risk."
+    )
     parts.append(DB_INFO)
     return " ".join(parts)
 
 @mcp.tool(description=execute_query_description())
-def execute_query(query: str, params: dict = {}) -> str:
-    def format_value(val):
+def execute_query(query: str, params: dict[str, Any] | None = None) -> str:
+    if params is None:
+        params = {}
+
+    def format_value(val: Any) -> str:
         """Format a value for display, handling None and datetime types"""
         if val is None:
             return "NULL"
@@ -188,7 +197,7 @@ def execute_query(query: str, params: dict = {}) -> str:
             return val.isoformat()
         return str(val)
 
-    def format_result(cursor_result):
+    def format_result(cursor_result: Result[Any]) -> tuple[list[str], list[Any]]:
         """Format rows in a clean vertical format"""
         result, full_results = [], []
         size, i, did_truncate = 0, 0, False
@@ -229,12 +238,12 @@ def execute_query(query: str, params: dict = {}) -> str:
             result.append(f"Result: {i} rows")
             return result, full_results
 
-    def save_full_results(full_results):
+    def save_full_results(full_results: list[Any]) -> str | None:
         """Save complete result set for Claude if configured"""
         if not CLAUDE_LOCAL_FILES_PATH:
             return None
 
-        def serialize_row(row):
+        def serialize_row(row: Any) -> list[str]:
             return [format_value(val) for val in row]
 
         data = [serialize_row(row) for row in full_results]
