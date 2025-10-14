@@ -3,25 +3,54 @@ import json
 import hashlib
 from typing import Annotated, Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.utilities.logging import get_logger
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text, inspect
 from sqlalchemy.engine import Inspector
 
 from pydantic import Field
 
 from mcp_alchemy.models import DatabaseManager, QueryResult
 
+### Database ###
+
+logger = get_logger(__name__)
+database_manager = DatabaseManager.from_environment()
+
 ### Helpers ###
 
 def tests_set_global(k: str, v: Any) -> None:
     globals()[k] = v
 
-### Database ###
+async def validate_or_elicit_database(database: str | None, ctx: Context) -> str | None:
+    """Validate database name or elicit from user if invalid.
 
-logger = get_logger(__name__)
-database_manager = DatabaseManager.from_environment()
+    Returns:
+        Valid database name if found or user accepts elicitation
+        None if user declines/cancels or client doesn't support elicitation
+    """
+    if database and database in database_manager.databases:
+        return database
+
+    try:
+        message = (
+            f"Database '{database}' not found. Which database do you want to use?"
+            if database
+            else "Which database do you want to use?"
+        )
+        result = await ctx.elicit(
+            message,
+            response_type=database_manager.get_available_databases()
+        )
+
+        if result.action == "accept":
+            return result.data
+        return None
+    except Exception:
+        # Client doesn't support elicitation or other error
+        return None
+
 
 
 
@@ -34,28 +63,52 @@ CLAUDE_LOCAL_FILES_PATH = os.environ.get('CLAUDE_LOCAL_FILES_PATH')
 
 ### MCP ###
 
-mcp = FastMCP("MCP Alchemy")
+mcp = FastMCP(name="Database Query MCP Tool",
+    version=VERSION,
+    instructions=f"""
+    A MCP server that connects to your database and allows you to query it.
+
+    Available databases:
+    {AVAILABLE_DATABASES}
+    """,
+
+)
 get_logger(__name__).info(f"Starting MCP Alchemy version {VERSION}")
 
 @mcp.tool(
-    description=f"Return table names in the database. If 'q' is provided, filter to names containing that substring. {AVAILABLE_DATABASES}"
+    description="Return table names in the database. If 'q' is provided, filter to names containing that substring."
 )
-def get_table_names(
+async def get_table_names(
+    ctx: Context,
     database: Annotated[str, Field(description="Database to query")],
     q: Annotated[str | None, Field(default=None, description="Optional substring to search for in table names (if not provided, returns all tables)")]
 ) -> str:
-    with database_manager.get_connection(database) as conn:
-        inspector = inspect(conn)
-        table_names = inspector.get_table_names()
-        if q:
-            table_names = [name for name in table_names if q in name]
+    database = await validate_or_elicit_database(database, ctx)
+    if database is None:
+        return f"Available databases:\n{AVAILABLE_DATABASES}"
+
+    async with database_manager.connection(database) as conn:
+        def _get_tables(sync_conn):
+            inspector = inspect(sync_conn)
+            table_names = inspector.get_table_names()
+            if q:
+                return [name for name in table_names if q in name]
+            return table_names
+
+        table_names = await conn.run_sync(_get_tables)
         return ", ".join(table_names)
 
-@mcp.tool(description=f"Returns schema and relation information for the given tables. {AVAILABLE_DATABASES}")
-def schema_definitions(
+@mcp.tool(description="Returns schema and relation information for the given tables.")
+async def schema_definitions(
+        ctx: Context,
         database: Annotated[str, Field(description="Database to query")],
         table_names: Annotated[list[str], Field(default_factory=list, description="The names of the tables to get the schema for")]
     ) -> str:
+
+    database = await validate_or_elicit_database(database, ctx)
+    if database is None:
+        return f"Available databases:\n{AVAILABLE_DATABASES}"
+
     def format(inspector: Inspector, table_name: str) -> str:
         columns = inspector.get_columns(table_name)
         foreign_keys = inspector.get_foreign_keys(table_name)
@@ -124,9 +177,12 @@ def schema_definitions(
 
         return "\n".join(result)
 
-    with database_manager.get_connection(database) as conn:
-        inspector = inspect(conn)
-        return "\n".join(format(inspector, table_name) for table_name in table_names)
+    async with database_manager.connection(database) as conn:
+        def _get_schema(sync_conn):
+            inspector = inspect(sync_conn)
+            return "\n".join(format(inspector, table_name) for table_name in table_names)
+
+        return await conn.run_sync(_get_schema)
 
 def execute_query_description():
     parts = [
@@ -137,15 +193,21 @@ def execute_query_description():
     parts.append(
         "IMPORTANT: You MUST use the params parameter for query parameter substitution (e.g. 'WHERE id = :id' with params={'id': 123}) to prevent SQL injection. Direct string concatenation is a serious security risk."
     )
-    parts.append(AVAILABLE_DATABASES)
+    #parts.append(AVAILABLE_DATABASES)
     return " ".join(parts)
 
 @mcp.tool(description=execute_query_description())
-def execute_query(
+async def execute_query(
+    ctx: Context,
     database: Annotated[str, Field(description="Database to query")],
     query: Annotated[str, Field(description="SQL query to execute")],
     params: Annotated[dict[str, Any], Field(default_factory=dict, description="Query parameters for safe substitution")]
-) -> QueryResult:
+) -> QueryResult | str:
+
+    database = await validate_or_elicit_database(database, ctx)
+    if database is None:
+        return f"Available databases:\n{AVAILABLE_DATABASES}"
+
     def save_query_result(result: QueryResult) -> str | None:
         """Save complete result set for Claude if configured"""
         if not CLAUDE_LOCAL_FILES_PATH:
@@ -163,8 +225,9 @@ def execute_query(
             " (ALWAYS prefer fetching this url in artifacts instead of hardcoding the values if at all possible)")
 
     try:
-        with database_manager.get_connection(database) as connection:
-            cursor_result = connection.execute(text(query), params)
+        config = database_manager.get_database(database)
+        async with config.connection() as connection:
+            cursor_result = await connection.execute(text(query), params)
 
             if not cursor_result.returns_rows:
                 # For non-SELECT queries, return empty result with affected row count

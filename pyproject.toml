@@ -9,9 +9,10 @@ dependencies = [
     "sqlalchemy>=2.0.36",
     "azure-identity>=1.15.0",
     "azure-core>=1.30.0",
-    "psycopg2-binary>=2.9.10",
-    "pydantic"
-    ]
+    "asyncpg>=0.29.0",
+    "pydantic",
+    "greenlet"
+]
 authors = [
   { name="Rune Kaagaard" },
 ]

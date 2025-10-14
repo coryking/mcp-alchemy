@@ -1,8 +1,12 @@
 from dataclasses import dataclass, field
 import os
 import logging
+import sys
 from typing import Any
-from sqlalchemy.engine import Engine, Connection, Result
+from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection, create_async_engine
+from sqlalchemy.engine import Result, Engine
+from sqlalchemy import inspect as sqlalchemy_inspect
 from auth.tokens import token_cache
 from pydantic import BaseModel, Field, computed_field
 logger = logging.getLogger(__name__)
@@ -46,8 +50,8 @@ class QueryResult(BaseModel):
 
         return instance
 
-def create_engine_for_config(config: "DatabaseConfig") -> Engine:
-    """Create engine with MCP-optimized settings for a specific database config"""
+def create_engine_for_config(config: "DatabaseConfig") -> AsyncEngine:
+    """Create async engine with MCP-optimized settings for a specific database config"""
     import json
     db_engine_options = os.environ.get('DB_ENGINE_OPTIONS')
     user_options = json.loads(db_engine_options) if db_engine_options else {}
@@ -67,8 +71,7 @@ def create_engine_for_config(config: "DatabaseConfig") -> Engine:
         **user_options
     }
 
-    from sqlalchemy import create_engine
-    return create_engine(config.get_resolved_url(), **options)
+    return create_async_engine(config.get_resolved_url(), **options)
 
 
 @dataclass
@@ -77,7 +80,8 @@ class DatabaseConfig:
     url: str
     description: str = ""
     available: bool = True
-    engine: Engine | None = None
+    read_only: bool = False
+    engine: AsyncEngine | None = None
 
     def get_resolved_url(self) -> str:
         """Get connection URL with AZURE_TOKEN replaced if present"""
@@ -85,7 +89,7 @@ class DatabaseConfig:
             return self.url.replace('AZURE_TOKEN', token_cache.get_token())
         return self.url
 
-    def get_engine(self) -> Engine:
+    def get_engine(self) -> AsyncEngine:
         """Get or create the SQLAlchemy engine for this database"""
         if self.engine is None:
             self.engine = create_engine_for_config(self)
@@ -96,44 +100,54 @@ class DatabaseConfig:
         self.available = False
         if self.engine:
             try:
-                self.engine.dispose()
+                import asyncio
+                asyncio.create_task(self.engine.dispose())
             except Exception:
                 pass
         self.engine = None
 
-    def get_connection(self) -> Connection:
-        """Get a working database connection with retry logic"""
+    @asynccontextmanager
+    async def connection(self):
+        """Get a connection with proper setup (version, read-only enforcement)"""
+        from sqlalchemy import text
+
         if not self.available:
             raise ValueError(f"Database '{self.name}' is not available")
 
-        try:
-            return self._get_connection_attempt()
-        except Exception as e:
-            logger.warning(f"Connection failed for '{self.name}', retrying: {e}")
-            self._reset_for_retry()
-            return self._get_connection_attempt()
-
-    def _get_connection_attempt(self) -> Connection:
-        """Single connection attempt"""
-        from sqlalchemy import text
-
         engine = self.get_engine()
-        connection = engine.connect()
+        async with engine.connect() as conn:
+            # Set version variable for databases that support it
+            try:
+                _ = await conn.execute(text("SET @mcp_alchemy_version = '2025.8.15.91819'"))
+            except Exception:
+                # Some databases don't support session variables
+                pass
 
-        # Set version variable for databases that support it
-        try:
-            # Avoid circular import by hardcoding version or getting it differently
-            connection.execute(text("SET @mcp_alchemy_version = '2025.8.15.91819'"))
-        except Exception:
-            # Some databases don't support session variables
-            pass
+            # Set read-only mode if configured
+            if self.read_only:
+                try:
+                    # For PostgreSQL, set default transaction read-only
+                    if 'postgresql' in str(engine.url):
+                        _ = await conn.execute(text("SET SESSION default_transaction_read_only = on"))
+                    else:
+                        # For other databases, try to set transaction read-only
+                        _ = await conn.execute(text("SET TRANSACTION READ ONLY"))
+                except Exception as e:
+                    # If we cannot ensure read-only mode, we cannot use the database and need to violently puke
+                    # it is *crucial* to puke otherwise the LLM could easily change shit it shouldn't.
+                    logger.error(f"Failed to set read-only mode for database '{self.name}': {e}")
+                    sys.exit(1)
 
-        return connection
+            yield conn
 
-    def _reset_for_retry(self) -> None:
-        """Reset state for retry attempt"""
-        self.mark_unavailable()
-        self.engine = None  # Force recreation
+    def to_description_text(self) -> str:
+        desc_parts: list[str] = []
+        if self.description:
+            desc_parts.append(self.description)
+        if self.read_only:
+            desc_parts.append("read-only")
+        desc = f" ({', '.join(desc_parts)})" if desc_parts else ""
+        return f"{self.name}{desc}"
 
 
 @dataclass
@@ -162,19 +176,28 @@ class DatabaseManager:
                 desc_key = f'DB_{db_name_part}_DESC'
                 description = os.environ.get(desc_key, '')
 
+                # Get read-only setting (optional)
+                readonly_key = f'DB_{db_name_part}_READ_ONLY'
+                read_only = os.environ.get(readonly_key, '').lower() in ('true', '1', 'yes', 'on')
+
                 manager.databases[db_name] = DatabaseConfig(
                     name=db_name,
                     url=value,
-                    description=description
+                    description=description,
+                    read_only=read_only
                 )
 
         # Backwards compatibility: if no DB_*_URL vars, try DB_URL
         if not manager.databases:
             if 'DB_URL' in os.environ:
+                # Check for read-only setting (optional)
+                read_only = os.environ.get('DB_READ_ONLY', '').lower() in ('true', '1', 'yes', 'on')
+
                 manager.databases['default'] = DatabaseConfig(
                     name='default',
                     url=os.environ['DB_URL'],
-                    description='Default database'
+                    description='Default database',
+                    read_only=read_only
                 )
             else:
                 import sys
@@ -190,38 +213,14 @@ class DatabaseManager:
             raise ValueError(f"Database '{name}' is not configured")
         return self.databases[name]
 
+    def connection(self, database: str):
+        """Get a connection context manager for the specified database"""
+        return self.get_database(database).connection()
+
+    def get_available_databases(self) -> list[str]:
+        """Get available databases"""
+        return [config.name for config in self.databases.values() if config.available]
+
     def get_available_databases_text(self) -> str:
         """Get formatted text of available databases for tool descriptions"""
-        available_dbs = []
-        for config in self.databases.values():
-            if config.available:
-                desc = f" ({config.description})" if config.description else ""
-                available_dbs.append(f"{config.name}{desc}")
-        return "Available databases: " + ", ".join(available_dbs)
-
-    def get_connection(self, database: str) -> Connection:
-        """Get connection for database (case insensitive)"""
-        config = self.get_database(database)
-        return config.get_connection()
-
-    def get_db_info(self, database: str) -> str:
-        """Get database info for a specific database"""
-        with self.get_connection(database) as conn:
-            engine = conn.engine
-            url = engine.url
-            version_info = engine.dialect.server_version_info
-            version_str = '.'.join(str(x) for x in version_info) if version_info else "unknown"
-
-            result = [
-                f"Connected to {engine.dialect.name}",
-                f"version {version_str}",
-                f"database {url.database}",
-            ]
-
-            if url.host:
-                result.append(f"on {url.host}")
-
-            if url.username:
-                result.append(f"as user {url.username}")
-
-            return " ".join(result) + "."
+        return "\n".join(self.get_available_databases())
