@@ -1,11 +1,50 @@
 from dataclasses import dataclass, field
 import os
 import logging
-from sqlalchemy.engine import Engine, Connection
+from typing import Any
+from sqlalchemy.engine import Engine, Connection, Result
 from auth.tokens import token_cache
-
+from pydantic import BaseModel, Field, computed_field
 logger = logging.getLogger(__name__)
 
+class QueryResult(BaseModel):
+    columns: list[str] = Field(default_factory=list, description="The columns of the query result")
+    rows: list[list[Any]] = Field(default_factory=list, description="The rows of the query result")
+    database_row_count: int = Field(default=0, description="Total rows returned by the database query")
+    truncated: bool = Field(default=False, description="Whether results were truncated for response size")
+
+    @computed_field
+    @property
+    def returned_row_count(self) -> int:
+        """The number of rows included in this response"""
+        return len(self.rows)
+
+    @classmethod
+    def from_sqlalchemy_result(cls, result: Result[Any], max_rows: int = None) -> "QueryResult":
+        """Create QueryResult directly from SQLAlchemy Result"""
+        columns = list(result.keys())
+        rows = []
+        database_row_count = 0
+
+        # Collect all rows
+        for row in result:
+            database_row_count += 1
+            rows.append(list(row))
+
+        # Create instance
+        instance = cls(
+            columns=columns,
+            rows=rows,
+            database_row_count=database_row_count,
+            truncated=False
+        )
+
+        # Apply truncation if needed
+        if max_rows and database_row_count > max_rows:
+            instance.truncated = True
+            instance.rows = instance.rows[:max_rows]
+
+        return instance
 
 def create_engine_for_config(config: "DatabaseConfig") -> Engine:
     """Create engine with MCP-optimized settings for a specific database config"""

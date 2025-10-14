@@ -1,7 +1,6 @@
 import os
 import json
 import hashlib
-from datetime import datetime, date
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
@@ -9,11 +8,10 @@ from fastmcp.utilities.logging import get_logger
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Inspector
-from sqlalchemy.engine.result import Result
 
 from pydantic import Field
 
-from mcp_alchemy.models import DatabaseManager
+from mcp_alchemy.models import DatabaseManager, QueryResult
 
 ### Helpers ###
 
@@ -109,74 +107,21 @@ def execute_query(
     database: Annotated[str, Field(description="Database to query")],
     query: Annotated[str, Field(description="SQL query to execute")],
     params: Annotated[dict[str, Any], Field(default_factory=dict, description="Query parameters for safe substitution")]
-) -> str:
-    def format_value(val: Any) -> str:
-        """Format a value for display, handling None and datetime types"""
-        if val is None:
-            return "NULL"
-        if isinstance(val, (datetime, date)):
-            return val.isoformat()
-        return str(val)
-
-    def format_result(cursor_result: Result[Any]) -> tuple[list[str], list[Any]]:
-        """Format rows in a clean vertical format"""
-        result, full_results = [], []
-        size, i, did_truncate = 0, 0, False
-
-        i = 0
-        while row := cursor_result.fetchone():
-            i += 1
-            if CLAUDE_LOCAL_FILES_PATH:
-                full_results.append(row)
-            if did_truncate:
-                continue
-
-            sub_result = []
-            sub_result.append(f"{i}. row")
-            for col, val in zip(cursor_result.keys(), row):
-                sub_result.append(f"{col}: {format_value(val)}")
-
-            sub_result.append("")
-
-            size += sum(len(x) + 1 for x in sub_result)  # +1 is for line endings
-
-            if size > EXECUTE_QUERY_MAX_CHARS:
-                did_truncate = True
-                if not CLAUDE_LOCAL_FILES_PATH:
-                    break
-            else:
-                result.extend(sub_result)
-
-        if i == 0:
-            return ["No rows returned"], full_results
-        elif did_truncate:
-            if CLAUDE_LOCAL_FILES_PATH:
-                result.append(f"Result: {i} rows (output truncated)")
-            else:
-                result.append(f"Result: showing first {i-1} rows (output truncated)")
-            return result, full_results
-        else:
-            result.append(f"Result: {i} rows")
-            return result, full_results
-
-    def save_full_results(full_results: list[Any]) -> str | None:
+) -> QueryResult:
+    def save_query_result(result: QueryResult) -> str | None:
         """Save complete result set for Claude if configured"""
         if not CLAUDE_LOCAL_FILES_PATH:
             return None
 
-        def serialize_row(row: Any) -> list[str]:
-            return [format_value(val) for val in row]
-
-        data = [serialize_row(row) for row in full_results]
-        file_hash = hashlib.sha256(json.dumps(data).encode()).hexdigest()
+        file_hash = hashlib.sha256(result.model_dump_json().encode()).hexdigest()
         file_name = f"{file_hash}.json"
 
         with open(os.path.join(CLAUDE_LOCAL_FILES_PATH, file_name), 'w') as f:
-            json.dump(data, f)
+            json.dump(result.model_dump(), f)
 
         return (
             f"Full result set url: https://cdn.jsdelivr.net/pyodide/claude-local-files/{file_name}"
-            " (format: [[row1_value1, row1_value2, ...], [row2_value1, row2_value2, ...], ...]])"
+            " (format: QueryResult JSON with columns/rows structure)"
             " (ALWAYS prefer fetching this url in artifacts instead of hardcoding the values if at all possible)")
 
     try:
@@ -184,16 +129,26 @@ def execute_query(
             cursor_result = connection.execute(text(query), params)
 
             if not cursor_result.returns_rows:
-                return f"Success: {cursor_result.rowcount} rows affected"
+                # For non-SELECT queries, return empty result with affected row count
+                return QueryResult(
+                    columns=[],
+                    rows=[],
+                    database_row_count=cursor_result.rowcount,
+                    truncated=False
+                )
 
-            output, full_results = format_result(cursor_result)
+            # Create QueryResult from SQLAlchemy result
+            # Use a reasonable row limit to prevent memory issues
+            MAX_ROWS = 10000  # Much higher than old character limit
+            query_result = QueryResult.from_sqlalchemy_result(cursor_result, max_rows=MAX_ROWS)
 
-            if full_results_message := save_full_results(full_results):
-                output.append(full_results_message)
+            # Save full result for Claude if configured
+            _ = save_query_result(query_result)
 
-            return "\n".join(output)
+            return query_result
     except Exception as e:
-        return f"Error: {str(e)}"
+        # For errors, return empty result (could add error field to QueryResult if needed)
+        raise e
 
 def main():
     mcp.run()
