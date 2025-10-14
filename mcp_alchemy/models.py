@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, computed_field
 logger = logging.getLogger(__name__)
 
 class QueryResult(BaseModel):
+    database_name: str = Field(description="The name of the database the query result is from")
     columns: list[str] = Field(default_factory=list, description="The columns of the query result")
     rows: list[list[Any]] = Field(default_factory=list, description="The rows of the query result")
     database_row_count: int = Field(default=0, description="Total rows returned by the database query")
@@ -24,7 +25,7 @@ class QueryResult(BaseModel):
         return len(self.rows)
 
     @classmethod
-    def from_sqlalchemy_result(cls, result: Result[Any], max_rows: int = None) -> "QueryResult":
+    def from_sqlalchemy_result(cls, database_name: str, result: Result[Any], max_rows: int = None) -> "QueryResult":
         """Create QueryResult directly from SQLAlchemy Result"""
         columns = list(result.keys())
         rows = []
@@ -37,6 +38,7 @@ class QueryResult(BaseModel):
 
         # Create instance
         instance = cls(
+            database_name=database_name,
             columns=columns,
             rows=rows,
             database_row_count=database_row_count,
@@ -224,3 +226,7 @@ class DatabaseManager:
     def get_available_databases_text(self) -> str:
         """Get formatted text of available databases for tool descriptions"""
         return "\n".join(self.get_available_databases())
+
+    def get_available_databases_text_with_description(self) -> str:
+        """Get formatted text of available databases for tool descriptions with description"""
+        return "\n".join([config.to_description_text() for config in self.databases.values() if config.available])

@@ -76,11 +76,11 @@ mcp = FastMCP(name="Database Query MCP Tool",
 get_logger(__name__).info(f"Starting MCP Alchemy version {VERSION}")
 
 @mcp.tool(
-    description="Return table names in the database. If 'q' is provided, filter to names containing that substring."
+    description=f"Return table names in the database. If 'q' is provided, filter to names containing that substring. DB's:{database_manager.get_available_databases_text_with_description()}"
 )
 async def get_table_names(
     ctx: Context,
-    database: Annotated[str, Field(description="Database to query")],
+    database: Annotated[str | None, Field(description="Database to query")],
     q: Annotated[str | None, Field(default=None, description="Optional substring to search for in table names (if not provided, returns all tables)")]
 ) -> str:
     database = await validate_or_elicit_database(database, ctx)
@@ -105,15 +105,15 @@ async def schema_definitions(
         table_names: Annotated[list[str], Field(default_factory=list, description="The names of the tables to get the schema for")]
     ) -> str:
 
-    database = await validate_or_elicit_database(database, ctx)
-    if database is None:
+    selected_database = await validate_or_elicit_database(database, ctx)
+    if selected_database is None:
         return f"Available databases:\n{AVAILABLE_DATABASES}"
 
     def format(inspector: Inspector, table_name: str) -> str:
         columns = inspector.get_columns(table_name)
         foreign_keys = inspector.get_foreign_keys(table_name)
         primary_keys = set(inspector.get_pk_constraint(table_name)["constrained_columns"])
-        result = [f"{table_name}:"]
+        result = [f"Table: '{table_name}'"]
 
         # Process columns
         show_key_only = {"nullable", "autoincrement"}
@@ -177,10 +177,18 @@ async def schema_definitions(
 
         return "\n".join(result)
 
-    async with database_manager.connection(database) as conn:
+    async with database_manager.connection(selected_database) as conn:
+        overall_result = []
+        if database != selected_database:
+            overall_result.append(f"The user selected this database: '{selected_database}'")
+        else:
+            overall_result.append(f"Database: '{selected_database}'")
         def _get_schema(sync_conn):
             inspector = inspect(sync_conn)
-            return "\n".join(format(inspector, table_name) for table_name in table_names)
+            for table_name in table_names:
+                formatted = format(inspector, table_name)
+                overall_result.append(formatted)
+            return "\n".join(overall_result)
 
         return await conn.run_sync(_get_schema)
 
@@ -199,7 +207,7 @@ def execute_query_description():
 @mcp.tool(description=execute_query_description())
 async def execute_query(
     ctx: Context,
-    database: Annotated[str, Field(description="Database to query")],
+    database: Annotated[str, Field(description="Database to query", examples=database_manager.get_available_databases())],
     query: Annotated[str, Field(description="SQL query to execute")],
     params: Annotated[dict[str, Any], Field(default_factory=dict, description="Query parameters for safe substitution")]
 ) -> QueryResult | str:
@@ -232,6 +240,7 @@ async def execute_query(
             if not cursor_result.returns_rows:
                 # For non-SELECT queries, return empty result with affected row count
                 return QueryResult(
+                    database_name=database,
                     columns=[],
                     rows=[],
                     database_row_count=cursor_result.rowcount,
@@ -241,7 +250,7 @@ async def execute_query(
             # Create QueryResult from SQLAlchemy result
             # Use a reasonable row limit to prevent memory issues
             MAX_ROWS = 10000  # Much higher than old character limit
-            query_result = QueryResult.from_sqlalchemy_result(cursor_result, max_rows=MAX_ROWS)
+            query_result = QueryResult.from_sqlalchemy_result(database, cursor_result, max_rows=MAX_ROWS)
 
             # Save full result for Claude if configured
             _ = save_query_result(query_result)
