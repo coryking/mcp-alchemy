@@ -75,6 +75,47 @@ def schema_definitions(
                 column.pop("type"))] + [k if k in show_key_only else f"{k}={v}" for k, v in column.items() if v]
             result.append(f"    {name}: " + ", ".join(column_parts))
 
+        # Process indexes
+        try:
+            indexes = inspector.get_indexes(table_name)
+            if indexes:
+                result.extend(["", "    Indexes:"])
+                for index in indexes:
+                    name = index.get("name", "unnamed")
+                    columns = ", ".join(index["column_names"])
+                    unique = "unique" if index.get("unique") else ""
+                    unique_str = f" {unique}" if unique else ""
+                    result.append(f"      {name} on ({columns}){unique_str}")
+        except (NotImplementedError, AttributeError):
+            # Some databases don't support index introspection
+            pass
+
+        # Process unique constraints
+        try:
+            unique_constraints = inspector.get_unique_constraints(table_name)
+            if unique_constraints:
+                result.extend(["", "    Unique Constraints:"])
+                for constraint in unique_constraints:
+                    name = constraint.get("name", "unnamed")
+                    columns = ", ".join(constraint["column_names"])
+                    result.append(f"      {name} on ({columns})")
+        except (NotImplementedError, AttributeError):
+            # Some databases don't support unique constraint introspection
+            pass
+
+        # Process check constraints
+        try:
+            check_constraints = inspector.get_check_constraints(table_name)
+            if check_constraints:
+                result.extend(["", "    Check Constraints:"])
+                for constraint in check_constraints:
+                    name = constraint.get("name", "unnamed")
+                    sqltext = constraint.get("sqltext", "unknown")
+                    result.append(f"      {name}: {sqltext}")
+        except (NotImplementedError, AttributeError):
+            # Some databases don't support check constraint introspection
+            pass
+
         # Process relationships
         if foreign_keys:
             result.extend(["", "    Relationships:"])
