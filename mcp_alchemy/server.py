@@ -1,8 +1,10 @@
-import os, json, hashlib
+import os
+import json
+import hashlib
 from datetime import datetime, date
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.utilities.logging import get_logger
+from fastmcp import FastMCP
+from fastmcp.utilities.logging import get_logger
 
 from sqlalchemy import create_engine, inspect, text
 
