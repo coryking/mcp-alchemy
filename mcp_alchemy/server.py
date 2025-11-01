@@ -5,6 +5,7 @@ from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.utilities.logging import get_logger
+from mcp.types import ToolAnnotations
 
 from sqlalchemy import text, inspect
 from sqlalchemy.engine import Inspector
@@ -76,7 +77,8 @@ mcp = FastMCP(name="Database Query MCP Tool",
 get_logger(__name__).info(f"Starting MCP Alchemy version {VERSION}")
 
 @mcp.tool(
-    description=f"Return table names in the database. If 'q' is provided, filter to names containing that substring. DB's:{database_manager.get_available_databases_text_with_description()}"
+    description=f"Return table names in the database. If 'q' is provided, filter to names containing that substring. DB's:{database_manager.get_available_databases_text_with_description()}",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
 )
 async def get_table_names(
     ctx: Context,
@@ -98,7 +100,10 @@ async def get_table_names(
         table_names = await conn.run_sync(_get_tables)
         return ", ".join(table_names)
 
-@mcp.tool(description="Returns schema and relation information for the given tables.")
+@mcp.tool(
+    description="Returns schema and relation information for the given tables.",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
+)
 async def schema_definitions(
         ctx: Context,
         database: Annotated[str, Field(description="Database to query")],
@@ -192,20 +197,102 @@ async def schema_definitions(
 
         return await conn.run_sync(_get_schema)
 
-def execute_query_description():
+def execute_read_query_description():
     parts = [
-        f"Execute a SQL query and return results in a readable format. Results will be truncated after {EXECUTE_QUERY_MAX_CHARS} characters."
+        f"Execute a READ-ONLY SQL query (SELECT statements only). Results will be truncated after {EXECUTE_QUERY_MAX_CHARS} characters."
     ]
     if CLAUDE_LOCAL_FILES_PATH:
         parts.append("Claude Desktop may fetch the full result set via an url for analysis and artifacts.")
     parts.append(
         "IMPORTANT: You MUST use the params parameter for query parameter substitution (e.g. 'WHERE id = :id' with params={'id': 123}) to prevent SQL injection. Direct string concatenation is a serious security risk."
     )
-    #parts.append(AVAILABLE_DATABASES)
+    parts.append("This tool only accepts SELECT queries. Use execute_write_query for INSERT/UPDATE/DELETE operations.")
     return " ".join(parts)
 
-@mcp.tool(description=execute_query_description())
-async def execute_query(
+@mcp.tool(
+    description=execute_read_query_description(),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
+)
+async def execute_read_query(
+    ctx: Context,
+    database: Annotated[str, Field(description="Database to query", examples=database_manager.get_available_databases())],
+    query: Annotated[str, Field(description="SQL SELECT query to execute")],
+    params: Annotated[dict[str, Any], Field(default_factory=dict, description="Query parameters for safe substitution")]
+) -> QueryResult | str:
+
+    # Validate this is a SELECT query
+    query_stripped = query.strip().upper()
+    if not query_stripped.startswith('SELECT'):
+        raise ValueError(
+            "This tool only accepts SELECT queries for read-only operations. "
+            "Use execute_write_query for INSERT, UPDATE, DELETE, or other write operations."
+        )
+
+    database = await validate_or_elicit_database(database, ctx)
+    if database is None:
+        return f"Available databases:\n{AVAILABLE_DATABASES}"
+
+    def save_query_result(result: QueryResult) -> str | None:
+        """Save complete result set for Claude if configured"""
+        if not CLAUDE_LOCAL_FILES_PATH:
+            return None
+
+        file_hash = hashlib.sha256(result.model_dump_json().encode()).hexdigest()
+        file_name = f"{file_hash}.json"
+
+        with open(os.path.join(CLAUDE_LOCAL_FILES_PATH, file_name), 'w') as f:
+            json.dump(result.model_dump(), f)
+
+        return (
+            f"Full result set url: https://cdn.jsdelivr.net/pyodide/claude-local-files/{file_name}"
+            " (format: QueryResult JSON with columns/rows structure)"
+            " (ALWAYS prefer fetching this url in artifacts instead of hardcoding the values if at all possible)")
+
+    try:
+        config = database_manager.get_database(database)
+        async with config.connection() as connection:
+            cursor_result = await connection.execute(text(query), params)
+
+            if not cursor_result.returns_rows:
+                # For non-SELECT queries, return empty result with affected row count
+                return QueryResult(
+                    database_name=database,
+                    columns=[],
+                    rows=[],
+                    database_row_count=cursor_result.rowcount,
+                    truncated=False
+                )
+
+            # Create QueryResult from SQLAlchemy result
+            # Use a reasonable row limit to prevent memory issues
+            MAX_ROWS = 10000  # Much higher than old character limit
+            query_result = QueryResult.from_sqlalchemy_result(database, cursor_result, max_rows=MAX_ROWS)
+
+            # Save full result for Claude if configured
+            _ = save_query_result(query_result)
+
+            return query_result
+    except Exception as e:
+        # For errors, return empty result (could add error field to QueryResult if needed)
+        raise e
+
+def execute_write_query_description():
+    parts = [
+        f"Execute a SQL query that MODIFIES the database (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, etc). Results will be truncated after {EXECUTE_QUERY_MAX_CHARS} characters."
+    ]
+    if CLAUDE_LOCAL_FILES_PATH:
+        parts.append("Claude Desktop may fetch the full result set via an url for analysis and artifacts.")
+    parts.append(
+        "IMPORTANT: You MUST use the params parameter for query parameter substitution (e.g. 'WHERE id = :id' with params={'id': 123}) to prevent SQL injection. Direct string concatenation is a serious security risk."
+    )
+    parts.append("WARNING: This tool can make irreversible changes to the database. Use execute_read_query for SELECT queries.")
+    return " ".join(parts)
+
+@mcp.tool(
+    description=execute_write_query_description(),
+    annotations={"readOnlyHint": False, "destructiveHint": True}
+)
+async def execute_write_query(
     ctx: Context,
     database: Annotated[str, Field(description="Database to query", examples=database_manager.get_available_databases())],
     query: Annotated[str, Field(description="SQL query to execute")],
